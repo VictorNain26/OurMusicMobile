@@ -1,10 +1,8 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { View, Text, Image, Button, ActivityIndicator, FlatList, StyleSheet } from 'react-native';
+import { View, Text, Image, Pressable, ActivityIndicator, StyleSheet, FlatList } from 'react-native';
 import { Audio } from 'expo-av';
 import RNEventSource from 'react-native-event-source';
-
-// Si TypeScript, déclarer le module au besoin
-// declare module 'react-native-event-source';
+import { Ionicons } from '@expo/vector-icons';
 
 interface Song {
   artist: string;
@@ -19,211 +17,143 @@ interface Station {
 
 interface NowPlayingData {
   station?: Station;
-  now_playing?: {
-    song: Song;
-  };
+  now_playing?: { song: Song };
   song_history?: { song: Song }[];
 }
 
 const AzuracastPlayer: React.FC = () => {
-  // URL SSE d'AzuraCast
-  const sseBaseUri = "https://ourmusic-azuracast.ovh/api/live/nowplaying/sse";
-  const sseUriParams = new URLSearchParams({
-    "cf_connect": JSON.stringify({ "subs": { "station:ourmusic": { "recover": true } } })
-  });
-  const sseUri = `${sseBaseUri}?${sseUriParams.toString()}`;
+  const sseUri = 'https://ourmusic-azuracast.ovh/api/live/nowplaying/sse?cf_connect=%7B%22subs%22%3A%7B%22station%3Aourmusic%22%3A%7B%22recover%22%3Atrue%7D%7D%7D';
 
-  // States "nowPlaying" et autres
   const [nowPlaying, setNowPlaying] = useState<NowPlayingData | null>(null);
-  const [songHistory, setSongHistory] = useState<Song[]>([]);
-
-  const [isPlaying, setIsPlaying] = useState<boolean>(false);
+  const [history, setHistory] = useState<Song[]>([]);
+  const [isPlaying, setIsPlaying] = useState(false);
   const [sound, setSound] = useState<Audio.Sound | null>(null);
-  const [volume, setVolume] = useState<number>(1);
 
-  // Ref pour l'EventSource
   const sseRef = useRef<RNEventSource | null>(null);
 
-  // Connexion SSE (silencieuse en cas d'erreur)
   const connectSSE = () => {
-    // Fermer la connexion précédente
-    if (sseRef.current) {
-      sseRef.current.close();
-    }
+    if (sseRef.current) sseRef.current.close();
 
-    console.log('[connectSSE] Connecting SSE =>', sseUri);
-
-    const sse = new RNEventSource(sseUri, {
-      withCredentials: false, 
-      headers: { "Accept": "text/event-stream" },
-    });
-
+    const sse = new RNEventSource(sseUri);
     sseRef.current = sse;
 
-    // Quand la connexion SSE s'ouvre
-    sse.addEventListener("open", (evt: any) => {
-      console.log('[SSE] open =>', evt);
-    });
+    sse.addEventListener('message', (e) => {
+      if (!e.data || e.data.trim() === '.') return;
 
-    // Quand on reçoit un nouveau message SSE
-    sse.addEventListener("message", (evt: any) => {
-      console.log('[SSE] message =>', evt);
-
-      if (!evt.data || evt.data.trim() === '.') {
-        // "." est un ping keep-alive d'AzuraCast
-        return;
-      }
       try {
-        const jsonData = JSON.parse(evt.data);
-        console.log('[SSE] parsed =>', jsonData);
-
-        if (jsonData.pub && jsonData.pub.data?.np) {
-          const np = jsonData.pub.data.np as NowPlayingData;
-          setNowPlaying(np);
-
-          // Derniers 5 morceaux
-          const history = np.song_history
-            ?.slice(0, 5)
-            .map((item: { song: Song }) => item.song) || [];
-          setSongHistory(history);
-
-          console.log('[SSE] nowPlaying updated =>', np);
-        }
-      } catch (error) {
-        console.warn('[SSE] JSON parse error =>', error);
+        const data = JSON.parse(e.data);
+        const np = data.pub?.data?.np as NowPlayingData;
+        setNowPlaying(np);
+        setHistory(np.song_history?.slice(0, 5).map((item: any) => item.song) || []);
+      } catch (err) {
+        console.warn('[SSE] Parse error', err);
       }
     });
 
-    // En cas d'erreur, on ne met plus d'état "error" => on reconnecte silencieusement
-    sse.addEventListener("error", (evt: any) => {
-      console.warn('[SSE] error =>', evt);
-      // Reconnextion silencieuse après 5 secondes
-      setTimeout(() => {
-        connectSSE();
-      }, 5000);
-    });
-
-    // Certains environnements SSE n'émettent pas "close", mais on l'écoute au cas où
-    sse.addEventListener("close", (evt: any) => {
-      console.log('[SSE] close =>', evt);
+    sse.addEventListener('error', () => {
+      setTimeout(connectSSE, 5000); // retry silently
     });
   };
 
-  // Au montage, on lance la connexion SSE
   useEffect(() => {
     connectSSE();
-    // Nettoyage au démontage
-    return () => {
-      console.log('[useEffect cleanup] Closing SSE');
-      if (sseRef.current) {
-        sseRef.current.close();
-      }
-    };
+    return () => sseRef.current?.close();
   }, []);
 
-  // Bouton Play/Stop
   const handlePlayPause = async () => {
     if (isPlaying) {
-      // STOP
-      if (sound) {
-        console.log('[handlePlayPause] STOP =>');
-        await sound.stopAsync();
-        await sound.unloadAsync();
-        setSound(null);
-      }
+      await sound?.stopAsync();
+      await sound?.unloadAsync();
+      setSound(null);
       setIsPlaying(false);
-    } else {
-      // PLAY
-      if (nowPlaying?.station?.listen_url) {
-        console.log('[handlePlayPause] PLAY =>', nowPlaying.station.listen_url);
-        const { sound: newSound } = await Audio.Sound.createAsync(
-          { uri: nowPlaying.station.listen_url },
-          { shouldPlay: true, volume }
-        );
-        setSound(newSound);
-        setIsPlaying(true);
-      } else {
-        console.warn('[handlePlayPause] No listen_url => cannot play');
-      }
+    } else if (nowPlaying?.station?.listen_url) {
+      const { sound: newSound } = await Audio.Sound.createAsync(
+        { uri: nowPlaying.station.listen_url },
+        { shouldPlay: true }
+      );
+      setSound(newSound);
+      setIsPlaying(true);
     }
   };
 
+  if (!nowPlaying) return <ActivityIndicator size="large" />;
+
   return (
-    <View style={styles.container}>
-      {nowPlaying ? (
-        <>
-          <Text style={styles.title}>
-            {nowPlaying.station?.name || "Radio"}
-          </Text>
-
-          {nowPlaying.now_playing?.song?.art && (
-            <Image
-              source={{ uri: nowPlaying.now_playing.song.art }}
-              style={styles.art}
-            />
-          )}
-
-          <Text style={styles.songTitle}>
-            {nowPlaying.now_playing?.song?.artist} - {nowPlaying.now_playing?.song?.title}
-          </Text>
-
-          <Button
-            title={isPlaying ? "Stop" : "Play"}
-            onPress={handlePlayPause}
-          />
-
-          <Text style={styles.historyTitle}>
-            Historique des 5 derniers morceaux :
-          </Text>
-          <FlatList
-            data={songHistory}
-            keyExtractor={(item, index) => index.toString()}
-            renderItem={({ item }) => (
-              <Text style={styles.historyItem}>
-                {item.artist} - {item.title}
-              </Text>
-            )}
-          />
-        </>
-      ) : (
-        // On n'a pas de données "nowPlaying" => chargement
-        <ActivityIndicator size="large" />
+    <View style={styles.card}>
+      {nowPlaying.now_playing?.song?.art && (
+        <Image source={{ uri: nowPlaying.now_playing.song.art }} style={styles.cover} />
       )}
+      <Text style={styles.title}>{nowPlaying.station?.name}</Text>
+      <Text style={styles.subtitle}>
+        {nowPlaying.now_playing?.song?.artist} - {nowPlaying.now_playing?.song?.title}
+      </Text>
+
+      <Pressable style={styles.button} onPress={handlePlayPause}>
+        <Ionicons name={isPlaying ? 'pause' : 'play'} size={24} color="#fff" />
+      </Pressable>
+
+      <Text style={styles.historyLabel}>Derniers morceaux</Text>
+      <FlatList
+        data={history}
+        scrollEnabled={false}
+        keyExtractor={(item, index) => `${item.artist}-${index}`}
+        renderItem={({ item }) => (
+          <Text style={styles.historyItem}>
+            {item.artist} - {item.title}
+          </Text>
+        )}
+      />
     </View>
   );
 };
 
-// Styles
 const styles = StyleSheet.create({
-  container: {
-    flex: 1, 
-    justifyContent: 'center',
+  card: {
+    backgroundColor: '#fff',
+    borderRadius: 16,
+    padding: 16,
     alignItems: 'center',
-    padding: 20
+    width: '100%',
+    shadowColor: '#000',
+    shadowOpacity: 0.1,
+    shadowRadius: 6,
+    elevation: 4,
+    marginTop: 20,
+  },
+  cover: {
+    width: 150,
+    height: 150,
+    borderRadius: 12,
+    marginBottom: 12,
   },
   title: {
-    fontSize: 24, 
-    fontWeight: 'bold',
-    marginVertical: 10
-  },
-  songTitle: {
     fontSize: 18,
-    marginVertical: 10
+    fontWeight: '700',
+    marginBottom: 4,
   },
-  art: {
-    width: 100, 
-    height: 100, 
-    marginVertical: 10
+  subtitle: {
+    fontSize: 16,
+    color: '#555',
+    textAlign: 'center',
+    marginBottom: 12,
   },
-  historyTitle: {
-    fontSize: 20,
+  button: {
+    backgroundColor: '#0a7ea4',
+    padding: 12,
+    borderRadius: 50,
+    marginBottom: 16,
+  },
+  historyLabel: {
     fontWeight: 'bold',
-    marginTop: 20
+    fontSize: 16,
+    marginBottom: 6,
+    alignSelf: 'flex-start',
   },
   historyItem: {
-    fontSize: 16,
-    marginVertical: 5
-  }
+    fontSize: 14,
+    color: '#444',
+    alignSelf: 'flex-start',
+  },
 });
 
 export default AzuracastPlayer;
